@@ -1,6 +1,6 @@
-import { ReactNode, useMemo, useState } from 'react';
+import { ReactNode, useEffect, useMemo, useState } from 'react';
 import { useStore, viewId, balanceAfter } from './store';
-import { CONFIG, Wallet, sanitationAt, SAN_TOTAL } from './config';
+import { CONFIG, Wallet, sanitationAt, SAN_TOTAL, coinsOf, priceOf } from './config';
 import { sfx } from './Sound';
 
 const peso = (n: number) => `${CONFIG.currency}${n}`;
@@ -39,6 +39,7 @@ function QR({ seed }: { seed: number }) {
 /** Full-screen zoomed phone: payment processing, then a demo receipt showing the deducted amount. */
 function PhoneOverlay() {
   const s = useStore();
+  const price = priceOf(s.service);
   const w = CONFIG.wallets.find((x) => x.id === s.wallet) ?? CONFIG.wallets[0];
   if (s.method !== 'qr' || (s.qr !== 'processing' && s.qr !== 'receipt')) return null;
   return (
@@ -46,18 +47,18 @@ function PhoneOverlay() {
       <div className="bigphone"><div className="notch" />
         <div className="appbar" style={{ background: w.bg, color: w.fg }}>{w.name}</div>
         {s.qr === 'processing' ? (
-          <div className="appbody center"><div className="spin" /><h3>Paying HelmLock V2</h3><p>{money(CONFIG.amount)}</p><small>Processing payment…</small></div>
+          <div className="appbody center"><div className="spin" /><h3>Paying HelmLock V2</h3><p>{money(price)}</p><small>Processing payment…</small></div>
         ) : (
           <div className="appbody">
-            <div className="rhead"><div className="check">✓</div><h3>Payment Successful</h3><div className="amt">{money(CONFIG.amount)}</div></div>
+            <div className="rhead"><div className="check">✓</div><h3>Payment Successful</h3><div className="amt">{money(price)}</div></div>
             <dl className="rcpt">
               <dt>Merchant</dt><dd>HelmLock V2 (demo)</dd>
               <dt>Paid via</dt><dd>{w.name}</dd>
               <dt>Reference No.</dt><dd>{s.qrRef}</dd>
               <dt>Date</dt><dd>{s.qrAt ? new Date(s.qrAt).toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' }) : ''}</dd>
               <dt>Balance before</dt><dd>{money(CONFIG.walletBalance)}</dd>
-              <dt>Amount deducted</dt><dd className="neg">−{money(CONFIG.amount)}</dd>
-              <dt>Balance after</dt><dd><b>{money(CONFIG.walletBalance - CONFIG.amount)}</b></dd>
+              <dt>Amount deducted</dt><dd className="neg">−{money(price)}</dd>
+              <dt>Balance after</dt><dd><b>{money(CONFIG.walletBalance - price)}</b></dd>
             </dl>
             <small>Demo receipt only. No real transaction occurred.</small>
             <button className="btn" onClick={s.finishQr}>Done</button>
@@ -74,11 +75,24 @@ export default function UI() {
   const side = view.startsWith('locker') || view.startsWith('close');
   const compact = !side && (!['screen', 'showcase'].includes(view) || ['stored', 'completed'].includes(s.stage));
   const [muted, setMuted] = useState(sfx.isMuted());
+  const [volume, setVolume] = useState(sfx.getVolume());
   const inFlow = !['idle', 'completed', 'stored'].includes(s.stage);
-  const next = CONFIG.coins[s.coins];
+  const price = priceOf(s.service);
+  const serviceCoins = coinsOf(s.service);
+  const next = serviceCoins[s.coins];
   const rented = Object.keys(s.rentals).length;
   const san = sanitationAt(s.sanitize);
   const stages = CONFIG.sanitationStages;
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() !== 'h' || event.repeat || s.stage !== 'idle') return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
+      s.toggleHotspots();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [s.stage, s.toggleHotspots]);
   const sanTitle = s.sanitize <= 0 ? 'Preparing the compartment' : s.sanitize >= 1 ? 'Cycle completed' : `${stages[san.index].label} (${san.index + 1} of ${stages.length})`;
   const qrText: Record<string, string> = {
     show: 'Click the QR code to scan it with your phone.', phone: 'Phone approaching…', scanning: 'Scanning code…',
@@ -89,7 +103,7 @@ export default function UI() {
   switch (s.stage) {
     case 'welcome':
       body = (<><h1>Welcome to {CONFIG.brand}</h1>
-        <p>{rented === 0 ? `Secure helmet storage with optional sanitation. Pay ${peso(CONFIG.amount)}, get an access card, and pick up your helmet anytime.` : `${rented} of 3 lockers in use. Rent another locker or retrieve a stored helmet.`}</p>
+        <p>{rented === 0 ? `Secure helmet storage with optional sanitation. Choose a service, get an access card, and pick up your helmet anytime.` : `${rented} of 3 lockers in use. Rent another locker or retrieve a stored helmet.`}</p>
         {rented === 0 ? <Btn onClick={s.begin}>Begin</Btn>
           : <div className="row"><Btn onClick={s.begin} disabled={rented >= 3}>{rented >= 3 ? 'All lockers in use' : 'Rent a locker'}</Btn><Btn ghost onClick={s.startRetrieval}>Retrieve Helmet</Btn></div>}</>);
       break;
@@ -105,20 +119,20 @@ export default function UI() {
     case 'service':
       body = (<><h2>Choose a service</h2>
         <div className="grid2">{(['locker', 'sanitize'] as const).map((k) => (
-          <button key={k} className="tile wide" onClick={() => s.selectService(k)}><b>{CONFIG.services[k].label}</b><span>{CONFIG.services[k].desc}</span><em>{peso(CONFIG.amount)}</em></button>))}</div>
+          <button key={k} className="tile wide" onClick={() => s.selectService(k)}><b>{CONFIG.services[k].label}</b><span>{CONFIG.services[k].desc}</span><em>{peso(CONFIG.services[k].price)}</em></button>))}</div>
         <Btn ghost onClick={s.back}>Back</Btn></>);
       break;
     case 'payment':
-      if (!s.method) body = (<><h2>Pay {peso(CONFIG.amount)}</h2><p>Both methods are simulated. No real payment is made.</p>
-        <div className="grid2"><button className="tile" onClick={() => s.chooseMethod('coin')}><b>Coin Payment</b><span>Insert four coins into the slot</span></button>
+      if (!s.method) body = (<><h2>Pay {peso(price)}</h2><p>Both methods are simulated. No real payment is made.</p>
+        <div className="grid2"><button className="tile" onClick={() => s.chooseMethod('coin')}><b>Coin Payment</b><span>Insert {serviceCoins.length} coins into the slot</span></button>
           <button className="tile" onClick={() => s.chooseMethod('qr')}><b>Online Payment via QR Code</b><span>GCash, Maya and online banking</span></button></div>
         <Btn ghost onClick={s.back}>Back</Btn></>);
       else if (s.method === 'coin') body = (<><h2>Insert coins</h2>
-        <div className="balance"><strong>{peso(balanceAfter(s.coins))}</strong> / {peso(CONFIG.amount)}</div>
-        <div className="dots">{CONFIG.coins.map((v, i) => <i key={i} className={i < s.coins ? 'on' : ''}>{i < s.coins ? peso(v) : ''}</i>)}</div>
+        <div className="balance"><strong>{peso(balanceAfter(s.coins, s.service))}</strong> / {peso(price)}</div>
+        <div className="dots">{serviceCoins.map((v, i) => <i key={i} className={i < s.coins ? 'on' : ''}>{i < s.coins ? peso(v) : ''}</i>)}</div>
         {s.paid ? <p className="ok">✓ Payment received</p> : <Btn onClick={s.insertCoin} disabled={s.coinBusy || next === undefined}>Insert {next !== undefined ? peso(next) : ''} coin</Btn>}
         {!s.paid && s.coins === 0 && <Btn ghost onClick={s.back}>Change method</Btn>}</>);
-      else body = (<><h2>Scan to pay {peso(CONFIG.amount)}</h2>
+      else body = (<><h2>Scan to pay {peso(price)}</h2>
         <div className="qrlayout">
           <div className="qrbox">
             <button className="qrbtn" onClick={s.scanQr} disabled={s.qr !== 'show'} aria-label="Click the QR code to scan with a phone">
@@ -151,7 +165,8 @@ export default function UI() {
           return <li key={st.key} className={state}><i style={{ width: state === 'done' ? '100%' : state === 'on' ? `${san.within * 100}%` : '0%' }} />{st.label}</li>;
         })}</ol>
         <p>{s.sanitize > 0 && s.sanitize < 1 ? stages[san.index].detail : ' '}{' '}{Math.max(0, Math.ceil((1 - s.sanitize) * SAN_TOTAL))}s remaining · <b>Simulated sanitation cycle</b></p>
-        <small>Visual demonstration only. It does not show real disinfection performance.</small></>);
+        <small>Visual demonstration only. It does not show real disinfection performance.</small>
+        {s.sanitize > 0 && s.sanitize < 1 && <Btn ghost onClick={s.skipSanitation}>Skip cycle</Btn>}</>);
       break;
     case 'stored':
       body = (<><h2>Helmet stored in Locker {(s.locker ?? 0) + 1}</h2><p>{s.service === 'sanitize' ? 'The simulated sanitation cycle is complete. ' : ''}Returning to the home screen…</p></>);
@@ -177,14 +192,19 @@ export default function UI() {
       <header><div className="brand"><b>HelmLock V2</b><span>Smart helmet storage and sanitation kiosk</span></div>
         <div className="top"><span className="badge">Simulation: no hardware, no real payments</span>
           <button className="btn ghost sm" data-silent aria-pressed={!muted} onClick={() => setMuted(sfx.toggleMute())}>{muted ? '🔇 Sound off' : '🔊 Sound on'}</button>
+          <label className="volume-control">Volume <input type="range" min="0" max="1" step="0.05" value={volume} aria-label="Sound volume" onChange={(event) => { const value = Number(event.target.value); setVolume(value); sfx.setVolume(value); }} /></label>
+          <div className="speed-control" aria-label="Animation speed">
+            {[0.5, 1, 2].map((speed) => <button key={speed} className={`btn ghost sm ${s.speed === speed ? 'selected' : ''}`} aria-pressed={s.speed === speed} onClick={() => s.setSpeed(speed)}>{speed}×</button>)}
+          </div>
+          {s.stage === 'idle' && <button className="btn ghost sm" aria-pressed={s.hotspots} onClick={s.toggleHotspots}>Hotspots (H)</button>}
           {inFlow && <Btn ghost onClick={() => s.home()}>Exit demo</Btn>}</div></header>
-      {s.stage === 'idle' && <div className="hint">{rented > 0 ? 'Click the touchscreen to rent another locker or retrieve a helmet' : 'Drag to rotate · Click the touchscreen to begin · Try clicking a locker door'}</div>}
+      {s.stage === 'idle' && <div className="hint">{s.hotspots ? 'Click a specification marker to inspect it · Press H to hide hotspots' : rented > 0 ? 'Click the touchscreen to rent another locker or retrieve a helmet' : 'Drag to rotate · Click the touchscreen to begin · Try clicking a locker door'}</div>}
       <div className={`warn ${s.warning ? 'show' : ''}`} role="alert">Unauthorized Access Prohibited.</div>
       {body && (
         <section key={s.stage + s.method + s.ret + s.card} className={`panel ${compact ? 'compact' : ''} ${side ? 'side' : ''} ${s.stage === 'payment' && s.method === 'qr' ? 'wide' : ''}`}>
           {['service', 'payment', 'card', 'placement', 'sanitation', 'stored'].includes(s.stage) && s.locker !== null && (
             <div className="chips"><span>Locker {s.locker + 1}</span>{s.service && <span>{CONFIG.services[s.service].label}</span>}
-              {s.paid && <span>Paid {peso(CONFIG.amount)}</span>}{s.cardId && <span>Card {s.cardId}</span>}</div>)}
+              {s.paid && <span>Paid {peso(price)}</span>}{s.cardId && <span>Card {s.cardId}</span>}</div>)}
           {body}
         </section>)}
       <PhoneOverlay />

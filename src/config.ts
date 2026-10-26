@@ -1,14 +1,11 @@
 /** Single place to tune the demo. All values are simulated. */
 export type SanKey = 'uv' | 'fog' | 'ozone' | 'dry';
+export type ServiceKey = 'locker' | 'sanitize';
 export interface Wallet { id: string; name: string; bg: string; fg: string; kind: 'wallet' | 'bank'; /** optional: path/URL to an official logo image (overrides the text badge) */ logo?: string }
 
 export const CONFIG = {
   brand: 'HelmLock V2',
   currency: '₱',
-  /** Amount required before payment succeeds (both services, both payment methods). */
-  amount: 30,
-  /** Coin denominations inserted in order. Four coins; must add up to `amount`. */
-  coins: [10, 10, 5, 5],
   /** Demo balance shown on the simulated phone before paying. */
   walletBalance: 500,
   /** Supported online payment apps shown next to the QR code. Put official logos in /public and set `logo: '/logos/gcash.png'`. */
@@ -34,10 +31,13 @@ export const CONFIG = {
     warningMs: 2200, qrPhoneMs: 1100, qrScanMs: 1500, qrProcessMs: 1800, receiptAutoMs: 7000, validateMs: 1100, storedMs: 3000,
   },
   services: {
-    locker: { label: 'Locker Only', desc: 'Secure storage for your helmet behind a locked front door.' },
-    sanitize: { label: 'Locker + Sanitation', desc: 'Secure storage plus a simulated 4-stage sanitation cycle while you are away.' },
-  },
+    locker: { label: 'Locker Only', desc: 'Secure storage for your helmet behind a locked front door.', price: 20, coins: [5, 5, 5, 5] },
+    sanitize: { label: 'Locker + Sanitation', desc: 'Secure storage plus a simulated 4-stage sanitation cycle while you are away.', price: 30, coins: [10, 10, 5, 5] },
+  } as Record<ServiceKey, { label: string; desc: string; price: number; coins: number[] }>,
 };
+
+export const priceOf = (service: ServiceKey | null) => CONFIG.services[service ?? 'locker'].price;
+export const coinsOf = (service: ServiceKey | null) => CONFIG.services[service ?? 'locker'].coins;
 
 export const SAN_TOTAL = CONFIG.sanitationStages.reduce((a, b) => a + b.seconds, 0);
 
@@ -52,7 +52,10 @@ export function sanitationAt(p: number) {
   return { index: 0, within: 0 };
 }
 
-const sum = CONFIG.coins.reduce((a, b) => a + b, 0);
-if (sum !== CONFIG.amount || CONFIG.coins.length !== 4) {
-  console.warn(`[HelmLock] coins sum to ${sum} (expected ${CONFIG.amount} using 4 coins).`);
-}
+(Object.keys(CONFIG.services) as ServiceKey[]).forEach((key) => {
+  const service = CONFIG.services[key];
+  const sum = service.coins.reduce((a, b) => a + b, 0);
+  if (sum !== service.price || service.coins.length !== 4) {
+    console.warn(`[HelmLock] ${key}: 4 coins must add up to ${service.price} (got ${sum}).`);
+  }
+});

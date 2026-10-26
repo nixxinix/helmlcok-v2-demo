@@ -4,6 +4,7 @@ let ctx: AudioContext | null = null;
 let master: GainNode;
 let noiseBuf: AudioBuffer;
 let muted = false;
+let volume = 1;
 
 function ensure() {
   if (ctx) return ctx;
@@ -12,7 +13,7 @@ function ensure() {
   ctx = new AC();
   const comp = ctx.createDynamicsCompressor();
   comp.threshold.value = -14; comp.knee.value = 10; comp.ratio.value = 10; comp.attack.value = 0.003; comp.release.value = 0.25;
-  master = ctx.createGain(); master.gain.value = MASTER;
+  master = ctx.createGain(); master.gain.value = MASTER * volume;
   master.connect(comp); comp.connect(ctx.destination);
   noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
   const d = noiseBuf.getChannelData(0);
@@ -97,11 +98,16 @@ const g = (fn: () => void) => () => { if (live()) fn(); };
 
 export const sfx = {
   isMuted: () => muted,
+  getVolume: () => volume,
+  setVolume: (value: number) => {
+    volume = Math.max(0, Math.min(1, value));
+    if (master) master.gain.value = muted ? 0 : MASTER * volume;
+  },
   toggleMute: () => {
     muted = !muted;
     if (muted) ambient(null);
     else unlock();
-    if (ctx) master.gain.setTargetAtTime(muted ? 0 : MASTER, ctx.currentTime, 0.015);
+    if (ctx) master.gain.setTargetAtTime(muted ? 0 : MASTER * volume, ctx.currentTime, 0.015);
     return muted;
   },
   ambient,

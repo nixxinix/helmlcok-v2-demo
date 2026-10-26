@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { CONFIG, SAN_TOTAL, sanitationAt } from './config';
+import gsap from 'gsap';
+import { CONFIG, SAN_TOTAL, sanitationAt, coinsOf, priceOf } from './config';
 import { sfx } from './Sound';
 
 export type Stage = 'idle' | 'welcome' | 'locker' | 'service' | 'payment' | 'card' | 'placement' | 'sanitation' | 'stored' | 'retrieval' | 'completed';
@@ -16,9 +17,10 @@ const ms = (s: number) => s * 1000;
 let timers: number[] = [];
 let ticker: number | undefined;
 let session = 0;
+let speedMul = 1;
 function later(fn: () => void, delay: number) {
   const s = session;
-  timers.push(window.setTimeout(() => { if (s === session) fn(); }, delay));
+  timers.push(window.setTimeout(() => { if (s === session) fn(); }, delay / speedMul));
 }
 function clearAll() {
   session++;
@@ -28,7 +30,7 @@ function clearAll() {
   ticker = undefined;
   sfx.ambient(null);
 }
-export const balanceAfter = (n: number) => CONFIG.coins.slice(0, n).reduce((a, b) => a + b, 0);
+export const balanceAfter = (n: number, service: Service | null) => coinsOf(service).slice(0, n).reduce((a, b) => a + b, 0);
 const newId = () => 'HL-' + Math.floor(Math.random() * 0xffff).toString(16).toUpperCase().padStart(4, '0');
 
 /** Everything belonging to the current (in-progress) transaction. Rentals live outside so they survive a return to the home screen. */
@@ -49,8 +51,9 @@ interface Actions {
   placeHelmet: () => void; helmetPlaced: () => void; finishStorage: () => void;
   startRetrieval: () => void; presentCard: (id: string) => void; retry: () => void;
   takeHelmet: () => void; helmetRemoved: () => void; doorClick: (i: number) => void; setHover: (i: number | null) => void;
+  toggleHotspots: () => void; setSpeed: (v: number) => void; skipSanitation: () => void;
 }
-export type State = ReturnType<typeof txFresh> & { rentals: Record<number, Rental>; intro: number; shake: { locker: number; n: number } } & Actions;
+export type State = ReturnType<typeof txFresh> & { rentals: Record<number, Rental>; intro: number; shake: { locker: number; n: number }; hotspots: boolean; speed: number } & Actions;
 
 export const useStore = create<State>((set, get) => {
   const door = (i: number, v: boolean) => get().doorOpen.map((d, k) => (k === i ? v : d));
@@ -59,7 +62,7 @@ export const useStore = create<State>((set, get) => {
     sfx[v ? 'doorOpen' : 'doorClose']();
   };
   return {
-    ...txFresh(), rentals: {}, intro: 0, shake: { locker: -1, n: 0 },
+    ...txFresh(), rentals: {}, intro: 0, shake: { locker: -1, n: 0 }, hotspots: false, speed: 1,
     /** Full restart: clears the transaction AND every rental. */
     reset: (stage = 'idle', replay = false) => { clearAll(); set({ ...txFresh(), stage, rentals: {}, intro: get().intro + (replay ? 1 : 0) }); },
     /** Back to the home screen: clears the transaction but keeps stored helmets (red lockers). */
@@ -96,13 +99,13 @@ export const useStore = create<State>((set, get) => {
     finishQr: () => { if (get().qr !== 'receipt') return; set({ qr: 'done' }); get().completePayment(); },
     insertCoin: () => {
       const s = get();
-      if (s.stage !== 'payment' || s.method !== 'coin' || s.coinBusy || s.paid || s.coins >= CONFIG.coins.length) return;
+      if (s.stage !== 'payment' || s.method !== 'coin' || s.coinBusy || s.paid || s.coins >= coinsOf(s.service).length) return;
       const n = s.coins + 1;
       set({ coins: n, coinBusy: true });
       sfx.coinToss();
       later(() => sfx.coin(), ms(T.coin) * 0.72);
       later(() => set({ coinBusy: false }), ms(T.coin));
-      if (balanceAfter(n) >= CONFIG.amount) later(() => get().completePayment(), ms(T.coin) + 300);
+      if (balanceAfter(n, s.service) >= priceOf(s.service)) later(() => get().completePayment(), ms(T.coin) + 300);
     },
     completePayment: () => {
       if (get().paid) return;
@@ -138,7 +141,7 @@ export const useStore = create<State>((set, get) => {
             sfx.stageChange();
             sfx.ambient(CONFIG.sanitationStages[0].key);
             ticker = window.setInterval(() => {
-              const p = get().sanitize + step;
+              const p = get().sanitize + step * speedMul;
               if (p >= 1) {
                 window.clearInterval(ticker); ticker = undefined;
                 set({ sanitize: 1 });
@@ -204,6 +207,12 @@ export const useStore = create<State>((set, get) => {
       later(() => set({ warning: false }), T.warningMs);
     },
     setHover: (i) => { set({ hover: i }); if (i !== null) sfx.tick(); },
+    toggleHotspots: () => set({ hotspots: !get().hotspots }),
+    setSpeed: (v) => { speedMul = v; gsap.globalTimeline.timeScale(v); set({ speed: v }); },
+    skipSanitation: () => {
+      const s = get();
+      if (s.stage === 'sanitation' && s.sanitize > 0 && s.sanitize < 1) set({ sanitize: 0.9999 });
+    },
   };
 });
 

@@ -30,7 +30,7 @@ States: `idle → welcome → locker → service → payment → card → placem
 
 | What | Where |
 | --- | --- |
-| Transaction amount, coin denominations (must be 4 coins summing to the amount) | `src/config.ts` → `amount`, `coins` |
+| Service prices and coin denominations (four coins summing to each price) | `src/config.ts` → `services` |
 | Sanitation duration | `src/config.ts` → `sanitationSeconds` |
 | Animation timing (camera, door, coin, card, helmet, QR, validation) | `src/config.ts` → `timing` |
 | Service names and descriptions | `src/config.ts` → `services` |
@@ -38,6 +38,8 @@ States: `idle → welcome → locker → service → payment → card → placem
 | Materials, colours, 3D parts | `src/Scene.tsx` (procedural geometry, no external assets) |
 | Kiosk screens and copy | `src/UI.tsx`, styling in `src/styles.css` |
 | Flow rules and sequencing | `src/store.ts` |
+
+Use the header controls to adjust sound volume and animation speed. On the showcase screen, toggle equipment hotspots with **Hotspots (H)** or press **H**. The simulated sanitation cycle can be skipped from its progress panel.
 
 To use your own GLB models, load them with Drei's `useGLTF` and replace `Tower`, `Kiosk`, or `Helmet` in `Scene.tsx`, keeping the door groups and slot positions from `layout.ts`.
 

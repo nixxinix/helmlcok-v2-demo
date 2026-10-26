@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import { useEffect, useMemo, useRef } from 'react';
 import { Canvas, useFrame, useThree, MeshProps } from '@react-three/fiber';
-import { OrbitControls, Environment, Lightformer, ContactShadows, MeshReflectorMaterial, Html } from '@react-three/drei';
+import { OrbitControls, Environment, Lightformer, ContactShadows, MeshReflectorMaterial, Html, RoundedBox } from '@react-three/drei';
+import { EffectComposer, Bloom, ToneMapping } from '@react-three/postprocessing';
+import { ToneMappingMode } from 'postprocessing';
 import gsap from 'gsap';
-import { useStore, viewId } from './store';
-import { CONFIG, sanitationAt } from './config';
+import { useStore, viewId, Stage } from './store';
+import { CONFIG, sanitationAt, coinsOf } from './config';
 import { TX, KX, FZ, Y, COIN_SLOT, viewFor } from './layout';
 import { sfx } from './Sound';
 
@@ -36,13 +38,52 @@ const cardTex = () => canvasTex(512, 320, (x) => {
   x.fillStyle = '#f0c75e'; x.fillRect(36, 220, 80, 60);
 });
 
+const plateTex = (n: string) => canvasTex(128, 128, (x) => {
+  x.fillStyle = '#0d1624'; x.fillRect(0, 0, 128, 128);
+  x.strokeStyle = TEAL; x.lineWidth = 6; x.strokeRect(5, 5, 118, 118);
+  x.fillStyle = '#dffcf8'; x.font = '700 78px system-ui, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(n, 64, 70);
+});
+
+const spriteTex = (ring: boolean) => canvasTex(64, 64, (x) => {
+  const g = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+  if (ring) {
+    g.addColorStop(0, 'rgba(255,255,255,0.05)'); g.addColorStop(0.7, 'rgba(255,255,255,0.15)');
+    g.addColorStop(0.88, 'rgba(255,255,255,0.95)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+  } else {
+    g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.4, 'rgba(255,255,255,0.45)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+  }
+  x.fillStyle = g; x.fillRect(0, 0, 64, 64);
+});
+
+const SCREENS: Record<Stage, [string, string]> = {
+  idle: ['Touch to start', 'HelmLock V2'], welcome: ['Welcome', 'Rent or retrieve'], locker: ['Choose a locker', 'Locker 1, 2 or 3'],
+  service: ['Choose service', 'Locker or + Sanitation'], payment: ['Payment', 'Coin or QR code'], card: ['Take your card', 'Access card ready'],
+  placement: ['Store your helmet', 'Door unlocked'], sanitation: ['Sanitizing…', 'Door locked'], stored: ['Helmet stored', 'Thank you'],
+  retrieval: ['Present your card', 'Retrieve helmet'], completed: ['Thank you', 'See you again'],
+};
+const screenCache = new Map<string, THREE.CanvasTexture>();
+function getScreen(a: string, b: string) {
+  const key = `${a}|${b}`;
+  let texture = screenCache.get(key);
+  if (!texture) {
+    texture = screenTex(a, b);
+    screenCache.set(key, texture);
+  }
+  return texture;
+}
+
 /* ---------- small helpers ---------- */
-type BP = { p: [number, number, number]; a: [number, number, number]; c?: string; m?: number; r?: number; e?: string; ei?: number } & Omit<MeshProps, 'position' | 'args'>;
-function B({ p, a, c = '#2a3039', m = 0.55, r = 0.42, e, ei = 0, ...rest }: BP) {
+type BP = { p: [number, number, number]; a: [number, number, number]; c?: string; m?: number; r?: number; e?: string; ei?: number; round?: number } & Omit<MeshProps, 'position' | 'args'>;
+function B({ p, a, c = '#2a3039', m = 0.55, r = 0.42, e, ei = 0, round, ...rest }: BP) {
+  const material = <meshStandardMaterial color={c} metalness={m} roughness={r} emissive={e ?? '#000000'} emissiveIntensity={ei} />;
+  if (round) {
+    return <RoundedBox position={p} args={a} radius={round} smoothness={3} castShadow receiveShadow {...rest}>{material}</RoundedBox>;
+  }
   return (
     <mesh position={p} castShadow receiveShadow {...rest}>
       <boxGeometry args={a} />
-      <meshStandardMaterial color={c} metalness={m} roughness={r} emissive={e ?? '#000000'} emissiveIntensity={ei} />
+      {material}
     </mesh>
   );
 }
@@ -85,13 +126,14 @@ function Door({ i }: { i: number }) {
   const g = useRef<THREE.Group>(null);
   const mat = useRef<THREE.MeshStandardMaterial>(null);
   const edge = useRef<THREE.LineBasicMaterial>(null);
+  const led = useRef<THREE.MeshBasicMaterial>(null);
   const open = useStore((s) => s.doorOpen[i]);
   const shake = useStore((s) => s.shake);
   const glassy = useStore((s) => s.stage === 'sanitation' && s.locker === i);
   const hl = useStore((s) => (s.stage === 'locker' && s.hover === i) || (s.locker === i && ['service', 'payment', 'card', 'placement', 'sanitation'].includes(s.stage)));
   const occ = useStore((s) => s.rentals[i] !== undefined);
   const edges = useMemo(() => new THREE.EdgesGeometry(new THREE.BoxGeometry(0.33, 0.58, 0.04)), []);
-  const num = useMemo(() => labelTex(String(i + 1), '#cfe8ff', 90), [i]);
+  const plate = useMemo(() => plateTex(String(i + 1)), [i]);
   const HX = TX + 0.175;
 
   useEffect(() => { if (g.current) gsap.to(g.current.rotation, { y: open ? 1.95 : 0, duration: T.door, ease: 'power2.inOut' }); }, [open]);
@@ -102,21 +144,25 @@ function Door({ i }: { i: number }) {
   useFrame(({ clock }) => {
     if (mat.current) { mat.current.opacity += ((glassy ? 0.14 : 1) - mat.current.opacity) * 0.08; mat.current.depthWrite = mat.current.opacity > 0.9; }
     if (edge.current) edge.current.opacity = hl ? 0.55 + 0.45 * Math.sin(clock.elapsedTime * 5) : 0;
+    if (led.current) led.current.color.set(glassy ? (Math.sin(clock.elapsedTime * 8) > 0 ? '#ffb020' : '#7a4a00') : occ ? '#ff5c5c' : '#3dff9a');
   });
 
   return (
     <group ref={g} position={[HX, Y[i], FZ + 0.012]}>
-      <mesh position={[-0.158, 0, 0]} castShadow receiveShadow
+      <RoundedBox args={[0.31, 0.54, 0.024]} radius={0.006} smoothness={3} position={[-0.158, 0, 0]} castShadow receiveShadow
         onClick={(e) => { e.stopPropagation(); useStore.getState().doorClick(i); }}
         onPointerOver={(e) => { e.stopPropagation(); if (!open) cursor(true); }} onPointerOut={() => cursor(false)}>
-        <boxGeometry args={[0.31, 0.54, 0.024]} />
         <meshStandardMaterial ref={mat} color="#6f7b8a" metalness={0.85} roughness={0.32} transparent />
-      </mesh>
-      <B p={[-0.275, 0, 0.02]} a={[0.026, 0.1, 0.014]} c="#1d3fb8" e="#3b6bff" ei={0.6} m={0.2} />
-      {[0.2, 0.17].map((y) => <B key={y} p={[-0.158, y, 0.016]} a={[0.1, 0.014, 0.008]} c="#cfd6df" m={0.9} r={0.25} />)}
-      <mesh position={[-0.158, -0.2, 0.0135]}><planeGeometry args={[0.07, 0.07]} /><meshBasicMaterial map={num} transparent toneMapped={false} /></mesh>
-      <mesh position={[-0.04, 0.23, 0.0135]}><circleGeometry args={[0.01, 16]} /><meshBasicMaterial color={occ ? '#ff5c5c' : '#3dff9a'} toneMapped={false} /></mesh>
+      </RoundedBox>
+      <group visible={!glassy}>
+        <B p={[-0.275, 0, 0.02]} a={[0.026, 0.1, 0.014]} c="#1d3fb8" e="#3b6bff" ei={0.6} m={0.2} round={0.004} />
+        {[0.2, 0.17].map((y) => <B key={y} p={[-0.158, y, 0.016]} a={[0.1, 0.014, 0.008]} c="#cfd6df" m={0.9} r={0.25} />)}
+        {[0, 1, 2, 3, 4].map((k) => <B key={k} p={[-0.158, -0.02 - k * 0.022, 0.014]} a={[0.15, 0.007, 0.004]} c="#151a21" m={0.2} />)}
+        <mesh position={[-0.158, -0.2, 0.0135]}><planeGeometry args={[0.05, 0.05]} /><meshBasicMaterial map={plate} toneMapped={false} /></mesh>
+      </group>
+      <mesh position={[-0.04, 0.23, 0.0135]}><circleGeometry args={[0.01, 16]} /><meshBasicMaterial ref={led} color="#3dff9a" toneMapped={false} /></mesh>
       <lineSegments geometry={edges} position={[-0.158, 0, 0.01]}><lineBasicMaterial ref={edge} color={TEAL} transparent opacity={0} toneMapped={false} /></lineSegments>
+      {glassy && <Html position={[-0.158, 0.31, 0.03]} center style={{ pointerEvents: 'none' }}><div className="lockchip">Door locked</div></Html>}
     </group>
   );
 }
@@ -128,31 +174,33 @@ function Kiosk() {
   const plate = useMemo(() => labelTex('HELMLOCK V2', '#2ee6d0', 56), []);
   const coinT = useMemo(() => labelTex('COIN', '#9fb2c8', 44), []);
   const cardT = useMemo(() => labelTex('CARD', '#9fb2c8', 44), []);
-  const idleT = useMemo(() => screenTex('Touch to start', 'HelmLock V2'), []);
-  const useT = useMemo(() => screenTex('HelmLock V2', 'Session in progress'), []);
+  const [screenTitle, screenSubtitle] = SCREENS[stage];
+  const screen = getScreen(screenTitle, screenSubtitle);
   const insert = () => useStore.getState().insertCoin();
   const coinHint = useStore((s) => s.stage === 'payment' && s.method === 'coin' && !s.paid);
-  useFrame(({ clock }) => { if (m.current) m.current.color.setScalar(idle ? 0.8 + 0.2 * Math.sin(clock.elapsedTime * 2.2) : 0.85); });
+  useFrame(({ clock }) => { if (m.current) m.current.color.setScalar(idle ? 0.8 + 0.2 * Math.sin(clock.elapsedTime * 2.2) : 0.9); });
   return (
     <group>
-      <B p={[KX, 0.5, 0]} a={[0.35, 1.0, 0.45]} c="#262c35" />
-      <B p={[KX, 1.006, 0]} a={[0.36, 0.012, 0.46]} c="#8a95a3" m={0.9} r={0.3} />
+      <B p={[KX, 0.5, 0]} a={[0.35, 1.0, 0.45]} c="#262c35" round={0.012} />
+      <B p={[KX, 1.006, 0]} a={[0.36, 0.012, 0.46]} c="#8a95a3" m={0.9} r={0.3} round={0.005} />
+      <B p={[KX, 0.9, FZ + 0.03]} a={[0.33, 0.02, 0.07]} c="#3a4452" m={0.8} r={0.3} round={0.006} />
       <mesh position={[KX, 0.945, FZ + 0.0015]}><planeGeometry args={[0.26, 0.065]} /><meshBasicMaterial map={plate} transparent toneMapped={false} /></mesh>
       {/* touchscreen */}
       <B p={[KX, 0.78, FZ + 0.006]} a={[0.3, 0.2, 0.014]} c="#0a0d12" m={0.3}
         onClick={(e) => { e.stopPropagation(); useStore.getState().screenClick(); }}
         onPointerOver={() => idle && cursor(true)} onPointerOut={() => cursor(false)} />
-      <mesh position={[KX, 0.78, FZ + 0.0135]}><planeGeometry args={[0.27, 0.168]} /><meshBasicMaterial ref={m} map={idle ? idleT : useT} toneMapped={false} /></mesh>
-      {/* coin acceptor */}
-      <B p={[KX, 0.58, FZ + 0.01]} a={[0.1, 0.14, 0.03]} c="#1a1f27" />
+      <mesh position={[KX, 0.78, FZ + 0.0135]}><planeGeometry args={[0.27, 0.168]} /><meshBasicMaterial ref={m} map={screen} toneMapped={false} /></mesh>
+      {/* coin acceptor and coin return cup */}
+      <B p={[KX, 0.58, FZ + 0.01]} a={[0.1, 0.14, 0.03]} c="#1a1f27" round={0.004} />
       <B p={COIN_SLOT} a={[0.006, 0.04, 0.006]} c="#000" e={TEAL} ei={1.6} />
+      <mesh position={[KX + 0.07, 0.57, FZ + 0.02]} rotation={[Math.PI / 2, 0, 0]} castShadow><cylinderGeometry args={[0.018, 0.018, 0.03, 20]} /><meshStandardMaterial color="#0b6f66" emissive={TEAL} emissiveIntensity={0.35} metalness={0.6} roughness={0.3} /></mesh>
       <mesh position={[KX, 0.52, FZ + 0.0261]}><planeGeometry args={[0.07, 0.02]} /><meshBasicMaterial map={coinT} transparent toneMapped={false} /></mesh>
       <mesh position={[KX, 0.58, 0.28]} onClick={(e) => { e.stopPropagation(); insert(); }} onPointerOver={() => coinHint && cursor(true)} onPointerOut={() => cursor(false)}>
         <boxGeometry args={[0.13, 0.17, 0.1]} /><meshBasicMaterial visible={false} />
       </mesh>
       {coinHint && <Html position={[KX, 0.47, 0.3]} center style={{ pointerEvents: 'none' }}><div className="finger"><span>👆</span>Insert coins here</div></Html>}
       {/* card dispenser */}
-      <B p={[KX, 0.36, FZ + 0.01]} a={[0.13, 0.05, 0.03]} c="#1a1f27" />
+      <B p={[KX, 0.36, FZ + 0.01]} a={[0.13, 0.05, 0.03]} c="#1a1f27" round={0.004} />
       <B p={[KX, 0.36, FZ + 0.0265]} a={[0.1, 0.008, 0.004]} c="#000" e={TEAL} ei={1.6} />
       <mesh position={[KX, 0.31, FZ + 0.0261]}><planeGeometry args={[0.07, 0.02]} /><meshBasicMaterial map={cardT} transparent toneMapped={false} /></mesh>
     </group>
@@ -174,6 +222,7 @@ function Tower() {
 /* ---------- animated props ---------- */
 function Coins() {
   const coins = useStore((s) => s.coins);
+  const service = useStore((s) => s.service);
   const refs = useRef<(THREE.Group | null)[]>([]);
   const prev = useRef(0);
   useEffect(() => {
@@ -192,7 +241,7 @@ function Coins() {
   }, [coins]);
   return (
     <>
-      {CONFIG.coins.map((v, i) => (
+      {coinsOf(service).map((v, i) => (
         <group key={i} ref={(el) => { refs.current[i] = el; }} visible={false}>
           <mesh rotation={[0, 0, Math.PI / 2]} castShadow>
             <cylinderGeometry args={[v >= 10 ? 0.014 : 0.011, v >= 10 ? 0.014 : 0.011, 0.003, 28]} />
@@ -262,8 +311,10 @@ function Helmet() {
       onClick={(e) => { e.stopPropagation(); const s = useStore.getState(); if (s.helmet === 'offered') s.placeHelmet(); else s.takeHelmet(); }}
       onPointerOver={() => click && cursor(true)} onPointerOut={() => cursor(false)}>
       <mesh scale={[1, 0.95, 1.12]} castShadow><sphereGeometry args={[0.13, 32, 24]} /><meshStandardMaterial color="#10192b" metalness={0.5} roughness={0.2} /></mesh>
-      <mesh scale={[1, 0.95, 1.12]} rotation={[0, 0, 0]}><sphereGeometry args={[0.134, 32, 16, Math.PI / 2 - 0.75, 1.5, 1.05, 0.6]} /><meshStandardMaterial color="#38e6d2" metalness={0.9} roughness={0.08} emissive="#0b6f66" emissiveIntensity={0.5} /></mesh>
-      <B p={[0, -0.1, 0.1]} a={[0.1, 0.04, 0.06]} c="#0c1220" m={0.3} />
+      <mesh scale={[1, 0.95, 1.12]}><sphereGeometry args={[0.134, 32, 16, Math.PI / 2 - 0.75, 1.5, 1.05, 0.6]} /><meshStandardMaterial color="#38e6d2" metalness={0.9} roughness={0.08} emissive="#0b6f66" emissiveIntensity={0.5} /></mesh>
+      <mesh rotation={[0, Math.PI / 2, 0]} scale={[1.12, 0.95, 1]}><torusGeometry args={[0.133, 0.008, 8, 48, Math.PI]} /><meshStandardMaterial color="#2ee6d0" emissive="#2ee6d0" emissiveIntensity={0.8} /></mesh>
+      <mesh position={[0, -0.115, 0]} rotation={[Math.PI / 2, 0, 0]} scale={[1, 1.1, 1]}><torusGeometry args={[0.105, 0.01, 8, 32]} /><meshStandardMaterial color="#1b2740" metalness={0.6} roughness={0.35} /></mesh>
+      <B p={[0, -0.1, 0.1]} a={[0.11, 0.045, 0.07]} c="#0c1220" m={0.3} round={0.01} />
       {click && helmet === 'offered' && <Html position={[0, 0.24, 0]} center style={{ pointerEvents: 'none' }}><div className="finger"><span>👆</span>Click to place</div></Html>}
       {click && helmet === 'inside' && <Html position={[0, 0.24, 0]} center style={{ pointerEvents: 'none' }}><div className="finger"><span>👆</span>Click to take</div></Html>}
     </group>
@@ -272,10 +323,10 @@ function Helmet() {
 
 /** Per-stage look of the sanitation cycle: 0 UV light, 1 fogging, 2 ozone, 3 drying. */
 const FX = [
-  { color: '#b99bff', size: 0.006, op: 0, speed: 0.02, drift: 0, light: '#8b5cff', li: 3.5, beam: 0.2 },
-  { color: '#e9fbff', size: 0.034, op: 0.5, speed: 0.07, drift: 0.03, light: '#7fe9ff', li: 1.0, beam: 0 },
-  { color: '#a9ffd0', size: 0.016, op: 0.85, speed: 0.03, drift: 0.22, light: '#6dffb8', li: 1.6, beam: 0 },
-  { color: '#ffb36b', size: 0.009, op: 0.85, speed: 0.5, drift: 0, light: '#ff8a3d', li: 2.2, beam: 0 },
+  { color: '#b99bff', size: 0.02, op: 0, speed: 0.02, drift: 0, light: '#8b5cff', li: 3.5, beam: 0.2 },
+  { color: '#cfefff', size: 0.1, op: 0.32, speed: 0.07, drift: 0.03, light: '#7fe9ff', li: 1.0, beam: 0 },
+  { color: '#a9ffd0', size: 0.045, op: 0.9, speed: 0.03, drift: 0.22, light: '#6dffb8', li: 1.6, beam: 0 },
+  { color: '#ffb36b', size: 0.03, op: 0.9, speed: 0.5, drift: 0, light: '#ff8a3d', li: 2.2, beam: 0 },
 ];
 function SanitizeFX() {
   const idx = useStore((s) => (s.stage === 'sanitation' ? sanitationAt(s.sanitize).index : -1));
@@ -285,6 +336,7 @@ function SanitizeFX() {
   const beam = useRef<THREE.MeshBasicMaterial>(null);
   const light = useRef<THREE.PointLight>(null);
   const N = 220;
+  const sprites = useMemo(() => [spriteTex(false), spriteTex(true)], []);
   const data = useMemo(() => {
     const a = new Float32Array(N * 3);
     for (let i = 0; i < N; i++) { a[i * 3] = (Math.random() - 0.5) * 0.28; a[i * 3 + 1] = Math.random() * 0.5; a[i * 3 + 2] = (Math.random() - 0.5) * 0.38; }
@@ -296,7 +348,11 @@ function SanitizeFX() {
     const on = idx >= 0, p = FX[Math.max(0, idx)], c = cur.current, k = Math.min(1, d * 3);
     c.size += (p.size - c.size) * k; c.op += ((on ? p.op : 0) - c.op) * k; c.li += ((on ? p.li : 0) - c.li) * k; c.beam += ((on ? p.beam : 0) - c.beam) * k;
     c.color.lerp(tc.set(p.color), k); c.lcolor.lerp(tc.set(p.light), k);
-    if (mat.current) { mat.current.size = c.size; mat.current.opacity = c.op; mat.current.color.copy(c.color); }
+    if (mat.current) {
+      mat.current.size = c.size; mat.current.opacity = c.op; mat.current.color.copy(c.color);
+      const texture = idx === 2 ? sprites[1] : sprites[0];
+      if (mat.current.map !== texture) { mat.current.map = texture; mat.current.needsUpdate = true; }
+    }
     if (beam.current) beam.current.opacity = c.beam;
     if (light.current) { light.current.intensity = c.li; light.current.color.copy(c.lcolor); }
     const pp = pts.current; if (!pp) return;
@@ -314,7 +370,7 @@ function SanitizeFX() {
     <group position={[TX, Y[l] - 0.27, 0]}>
       <points ref={pts}>
         <bufferGeometry><bufferAttribute attach="attributes-position" args={[data, 3]} /></bufferGeometry>
-        <pointsMaterial ref={mat} color="#b99bff" size={0.006} transparent opacity={0} depthWrite={false} />
+        <pointsMaterial ref={mat} map={sprites[0]} color="#b99bff" size={0.02} transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending} />
       </points>
       <mesh position={[0, 0.27, 0]}><boxGeometry args={[0.25, 0.52, 0.38]} /><meshBasicMaterial ref={beam} color="#8b5cff" transparent opacity={0} depthWrite={false} side={THREE.DoubleSide} /></mesh>
       <pointLight ref={light} position={[0, 0.5, 0.05]} color="#8b5cff" intensity={0} distance={1} />
@@ -322,28 +378,78 @@ function SanitizeFX() {
   );
 }
 
+const SPOTS: { p: [number, number, number]; t: string; d: string }[] = [
+  { p: [TX, Y[2] + 0.27, FZ + 0.12], t: 'UV light, 11W', d: 'Non-ozone UV disinfection bulb' },
+  { p: [TX, Y[2] + 0.02, FZ + 0.12], t: 'PTC heater fan, 22V', d: 'Warm airflow for the drying stage' },
+  { p: [TX, Y[1] - 0.25, FZ + 0.12], t: '4-head ultrasonic mist maker', d: 'Fogging with solution reservoir' },
+  { p: [0.09, Y[0], FZ + 0.1], t: '12V solenoid lock', d: 'Locks the door during the cycle' },
+  { p: [KX, 0.78, FZ + 0.1], t: '11.6" HDMI LCD touchscreen', d: 'Customer interface' },
+  { p: [KX, 0.6, FZ + 0.1], t: 'ALLAN 1239A coin acceptor', d: 'Universal coin acceptor' },
+  { p: [KX, 0.36, FZ + 0.1], t: 'Access card dispenser', d: 'Issues the retrieval card' },
+];
+function Hotspots() {
+  const on = useStore((s) => s.hotspots && s.stage === 'idle');
+  if (!on) return null;
+  return (
+    <>
+      {SPOTS.map((spot) => (
+        <Html key={spot.t} position={spot.p} center zIndexRange={[8, 0]}>
+          <button className="hs" aria-label={spot.t}><i /><span><b>{spot.t}</b>{spot.d}</span></button>
+        </Html>
+      ))}
+    </>
+  );
+}
+
 /* ---------- camera ---------- */
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
 function Rig() {
   const camera = useThree((s) => s.camera);
-  const controls = useThree((s) => s.controls) as unknown as { target: THREE.Vector3; enabled: boolean; update: () => void } | null;
+  const controls = useThree((s) => s.controls) as unknown as {
+    target: THREE.Vector3; enabled: boolean; update: () => void;
+    addEventListener: (type: string, listener: () => void) => void;
+    removeEventListener: (type: string, listener: () => void) => void;
+  } | null;
   const id = useStore(viewId);
   const intro = useStore((s) => s.intro);
   const prev = useRef('');
+  const sway = useRef({ base: new THREE.Vector3(), tmp: new THREE.Vector3(), on: false });
   useEffect(() => {
     if (!controls) return;
     camera.position.set(3.4, 2.4, 6.2); controls.target.set(0, 0.9, 0); controls.update(); sfx.whoosh();
   }, [intro, controls]);
   useEffect(() => {
     if (!controls) return;
+    const stop = () => { sway.current.on = false; };
+    controls.addEventListener('start', stop);
+    return () => controls.removeEventListener('start', stop);
+  }, [controls]);
+  useEffect(() => {
+    if (!controls) return;
     if (prev.current && prev.current !== id) sfx.whoosh();
     prev.current = id;
     const v = viewFor(id);
+    sway.current.on = false;
     gsap.killTweensOf([camera.position, controls.target]);
     controls.enabled = false;
     const d = id === 'showcase' ? 2.8 : T.camera;
     gsap.to(camera.position, { x: v.pos[0], y: v.pos[1], z: v.pos[2], duration: d, ease: 'power3.inOut' });
-    gsap.to(controls.target, { x: v.target[0], y: v.target[1], z: v.target[2], duration: d, ease: 'power3.inOut', onUpdate: () => controls.update(), onComplete: () => { controls.enabled = v.free; } });
+    gsap.to(controls.target, {
+      x: v.target[0], y: v.target[1], z: v.target[2], duration: d, ease: 'power3.inOut',
+      onUpdate: () => controls.update(),
+      onComplete: () => {
+        controls.enabled = v.free;
+        if (v.free) { sway.current.base.copy(camera.position).sub(controls.target); sway.current.on = true; }
+      },
+    });
   }, [id, controls, intro]);
+  useFrame(({ clock }) => {
+    const state = sway.current;
+    if (!state.on || !controls) return;
+    state.tmp.copy(state.base).applyAxisAngle(Y_AXIS, 0.4 * Math.sin(clock.elapsedTime * 0.35));
+    camera.position.copy(controls.target).add(state.tmp);
+    controls.update();
+  });
   return null;
 }
 
@@ -368,10 +474,14 @@ export default function Scene() {
       <group>
         <Tower /><Kiosk />
         {[0, 1, 2].map((i) => <Door key={i} i={i} />)}
-        <Helmet /><AccessCard /><Coins /><SanitizeFX />
+        <Helmet /><AccessCard /><Coins /><SanitizeFX /><Hotspots />
       </group>
       <OrbitControls makeDefault enablePan={false} enableDamping minDistance={0.8} maxDistance={7} maxPolarAngle={Math.PI / 2 - 0.04} />
       <Rig />
+      <EffectComposer multisampling={4}>
+        <Bloom intensity={0.7} luminanceThreshold={0.9} luminanceSmoothing={0.25} mipmapBlur />
+        <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
+      </EffectComposer>
     </Canvas>
   );
 }
